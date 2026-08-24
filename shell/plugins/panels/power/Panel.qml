@@ -19,6 +19,25 @@ Panel {
   property string activeProfile: ""
   property int profileIndex: 0
   property bool cursorActive: false
+  // Which row the keyboard is on. The panel had only one focusable row until
+  // the charge limit arrived, so h/l and j/k both drove the profile picker.
+  property string focusSection: "profile"
+
+  // Charge limit notches. The CLI takes any integer, but coarse stops suit the
+  // hardware. Several drivers round to their own steps. The documentation for ASUS
+  // says that the driver ignores every value other than 40/60/80/100.
+  readonly property var thresholdStops: [40, 50, 60, 70, 80, 90, 100]
+  // Whether this machine exposes a writable limit at all. The value comes from the
+  // exit code of the reader, not from its output. asus_wmi reports the interface as
+  // present but unreadable, until something writes to it.
+  property bool chargeLimitSupported: false
+  // Effective limit in percent, or -1 when supported hardware reports no value
+  // yet.
+  property int chargeLimit: -1
+  // While a change is in flight, the chosen stop index overrides the live reading.
+  // The knob then does not snap back during the CLI round-trip. A value of -1 means
+  // no pending change, and the panel follows chargeLimit.
+  property int chargeLimitPreview: -1
   readonly property bool showPercentage: setting("showPercentage", false) === true
   // With the percentage shown the button paints a text block wider than an
   // icon, so the open-panel mark takes the painted width instead of the
@@ -138,6 +157,7 @@ Panel {
     if (!batteryProc.running) batteryProc.running = true
     if (!profilesProc.running) profilesProc.running = true
     if (!systemProc.running) systemProc.running = true
+    if (!thresholdProc.running) thresholdProc.running = true
   }
 
   function updateKeyValue(raw, targetName) {
@@ -169,6 +189,50 @@ Panel {
     actionProc.running = true
   }
 
+  // Effective stop index. This is the pending choice while a change is in flight.
+  // If no change is in flight, it is the notch that the current limit rounds to.
+  function currentThresholdIndex() {
+    if (chargeLimitPreview >= 0) return chargeLimitPreview
+    if (chargeLimit < 0) return thresholdStops.length - 1
+    return Model.nearestThresholdStop(thresholdStops, chargeLimit)
+  }
+
+  function chargeLimitText() {
+    return Model.chargeLimitLabel(chargeLimitPreview >= 0 ? thresholdStops[chargeLimitPreview] : chargeLimit)
+  }
+
+  function setChargeLimit(index) {
+    if (actionProc.running) return
+    chargeLimitPreview = index
+    actionProc.command = ["omarchy-battery-threshold", String(thresholdStops[index])]
+    actionProc.running = true
+  }
+
+  function adjustChargeLimit(deltaSteps) {
+    setChargeLimit(Model.clampIndex(currentThresholdIndex() + deltaSteps, thresholdStops.length))
+  }
+
+  function updateChargeLimit(raw, supported) {
+    root.chargeLimitSupported = supported
+    if (!supported) {
+      root.chargeLimit = -1
+      root.chargeLimitPreview = -1
+      if (root.focusSection === "limit") root.focusSection = "profile"
+      return
+    }
+
+    var parsed = Model.parseKeyValue(raw)
+    root.chargeLimit = parsed.end === undefined ? -1 : Number(parsed.end)
+
+    // Drop the preview when the reading agrees with it. The comparison uses stop
+    // indices, not raw percentages, because the driver can round the value that we
+    // wrote. An 80 that comes back as 78 is still this notch.
+    if (root.chargeLimitPreview >= 0
+        && root.chargeLimit >= 0
+        && Model.nearestThresholdStop(root.thresholdStops, root.chargeLimit) === root.chargeLimitPreview)
+      root.chargeLimitPreview = -1
+  }
+
   function togglePercentage() {
     root.settings = Object.assign({}, root.settings, { showPercentage: !root.showPercentage })
     if (root.bar && root.bar.shell) root.bar.shell.updateEntryInline(root.moduleName, root.settings)
@@ -196,6 +260,7 @@ Panel {
       var idx = profiles.indexOf(activeProfile)
       profileIndex = idx >= 0 ? idx : 0
       cursorActive = false
+      focusSection = "profile"
     }
   }
 
@@ -221,6 +286,18 @@ Panel {
     id: systemProc
     command: ["omarchy-system-stats"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateKeyValue(text, "system") }
+  }
+
+  // This also does the capability probe. A non-zero exit means that this machine
+  // has no writable charge limit. That is the common case on desktops, and on
+  // laptops whose driver never exposed the sysfs files.
+  Process {
+    id: thresholdProc
+    command: ["omarchy-battery-threshold"]
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      root.updateChargeLimit(thresholdProc.stdout.text, exitCode === 0)
+    }
   }
 
   Process {
@@ -304,10 +381,19 @@ Panel {
       anchors.fill: parent
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
-        if (dx !== 0) root.selectProfileByDelta(dx)
-        else if (dy !== 0) root.selectProfileByDelta(dy)
+
+        // With a charge limit on screen there are two rows. Thus j/k moves
+        // between them, and h/l works in the focused row. Without a charge limit,
+        // the panel keeps its original single-row behavior, where both axes
+        // drove the profile picker.
+        if (dy !== 0 && root.chargeLimitSupported)
+          root.focusSection = root.focusSection === "profile" ? "limit" : "profile"
+        else if (root.focusSection === "limit")
+          root.adjustChargeLimit(dx)
+        else
+          root.selectProfileByDelta(dx !== 0 ? dx : dy)
       }
-      onActivateRequested: if (root.cursorActive) root.activateSelectedProfile()
+      onActivateRequested: if (root.cursorActive && root.focusSection === "profile") root.activateSelectedProfile()
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -488,14 +574,88 @@ Panel {
                 verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
                 bordered: true
                 active: root.activeProfile === modelData
-                hasCursor: root.cursorActive && root.profileIndex === index
+                hasCursor: root.cursorActive && root.focusSection === "profile" && root.profileIndex === index
                 onClicked: root.setProfile(modelData)
                 onHovered: function(h) {
                   if (h) {
                     root.cursorActive = true
+                    root.focusSection = "profile"
                     root.profileIndex = index
                   }
                 }
+              }
+            }
+          }
+        }
+
+        // ---------- Charge limit ----------
+        // This section is absent on hardware with no writable threshold. That is
+        // every desktop and many laptops. An empty section reads as something
+        // broken, not as something that the hardware does not support.
+        PanelSeparator {
+          visible: root.chargeLimitSupported
+          foreground: root.bar.foreground
+        }
+
+        Column {
+          visible: root.chargeLimitSupported
+          width: parent.width
+          spacing: Style.space(6)
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(chargeLimitHeader.implicitHeight, chargeLimitValue.implicitHeight)
+
+            PanelSectionHeader {
+              id: chargeLimitHeader
+              text: "CHARGE LIMIT"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+              id: chargeLimitValue
+              text: chargeLimitSlider.dragging
+                ? Model.chargeLimitLabel(root.thresholdStops[Math.round(chargeLimitSlider.liveValue)])
+                : root.chargeLimitText()
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
+          CursorSurface {
+            width: parent.width
+            height: chargeLimitSlider.implicitHeight + Style.spacing.controlGap
+            hasCursor: root.cursorActive && root.focusSection === "limit"
+            foreground: root.bar.foreground
+            outline: true
+
+            PanelSlider {
+              id: chargeLimitSlider
+              bar: root.bar
+              anchors.fill: parent
+              anchors.leftMargin: Style.space(6)
+              anchors.rightMargin: Style.space(6)
+              minimum: 0
+              maximum: root.thresholdStops.length - 1
+              step: 1
+              integer: true
+              tickCount: root.thresholdStops.length
+              value: root.currentThresholdIndex()
+              onReleased: function(v) { root.setChargeLimit(Math.round(v)) }
+            }
+
+            HoverHandler {
+              onHoveredChanged: if (hovered) {
+                root.cursorActive = true
+                root.focusSection = "limit"
               }
             }
           }

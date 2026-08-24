@@ -89,6 +89,35 @@ function modeLabel(device, onBattery, states) {
   return "Charging"
 }
 
+// Index of the notch closest to a percentage. The CLI takes any integer, and the
+// driver can round it again. Thus the slider must land on a value that it did not
+// offer. An off-notch 85% shows as the 90 notch, and the hardware does not move.
+function nearestThresholdStop(stops, percent) {
+  var values = Array.isArray(stops) ? stops : []
+  if (values.length === 0) return 0
+
+  var best = 0
+  var bestDistance = Infinity
+  for (var i = 0; i < values.length; i++) {
+    var distance = Math.abs(values[i] - percent)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = i
+    }
+  }
+  return best
+}
+
+// 100 is how the drivers spell "no limit". The panel shows that word, not a limit
+// that the battery never reaches. A supported battery that reports no value yet
+// gets a placeholder. asus_wmi does this before its first write.
+function chargeLimitLabel(percent) {
+  var value = Number(percent)
+  if (!isFinite(value) || value <= 0) return "—"
+  if (value >= 100) return "Off"
+  return value + "%"
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     clampIndex: clampIndex,
@@ -99,6 +128,8 @@ if (typeof module !== "undefined") {
     batteryFraction: batteryFraction,
     chargeThresholdActive: chargeThresholdActive,
     batteryIcon: batteryIcon,
-    modeLabel: modeLabel
+    modeLabel: modeLabel,
+    nearestThresholdStop: nearestThresholdStop,
+    chargeLimitLabel: chargeLimitLabel
   }
 }

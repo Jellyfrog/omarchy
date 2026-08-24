@@ -1,0 +1,207 @@
+#!/bin/bash
+
+# omarchy:summary=Show or set the battery charge limit
+# omarchy:args=[40|50|60|70|80|90|100|off]
+# omarchy:examples=omarchy battery threshold | omarchy battery threshold 80 | omarchy battery threshold off
+
+set -euo pipefail
+
+power_supply_path="${OMARCHY_POWER_SUPPLY_PATH:-/sys/class/power_supply}"
+state_dir="${OMARCHY_BATTERY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/battery}"
+
+# The path that etc/sudoers.d/omarchy-battery-threshold names. The privileged half
+# always runs from there, not from the copy that the caller invoked. The rule thus
+# matches even where $OMARCHY_PATH points at a checkout.
+PACKAGED_PATH=/usr/bin/omarchy-battery-threshold
+
+usage() {
+  echo "Usage: omarchy-battery-threshold [40|50|60|70|80|90|100|off]" >&2
+  exit 2
+}
+
+# The first battery that can take a limit. This walks the directory and does not
+# glob BAT*, which matters in both directions. USB-C sources enumerate here as
+# ucsi-source-psy-*, and nothing must write to them. The Wilco EC names its battery
+# wilco-charger, which a BAT* glob misses.
+threshold_battery() {
+  local supply
+
+  for supply in "$power_supply_path"/*; do
+    [[ -r $supply/type ]] || continue
+    [[ $(<"$supply/type") == "Battery" ]] || continue
+    [[ -f $supply/charge_control_end_threshold ]] || continue
+
+    # A battery that reports itself absent has no thresholds worth a write. This
+    # code trusts a driver that omits `present` entirely.
+    if [[ -r $supply/present ]]; then
+      [[ $(<"$supply/present") == "1" ]] || continue
+    fi
+
+    printf '%s\n' "$supply"
+    return 0
+  done
+
+  return 1
+}
+
+# Reads one threshold file, or fails. A failed read is not proof that the interface
+# is missing. asus_wmi returns -ENODATA until the first write, on kernel 7.1 and
+# later. Only the existence of the file decides support.
+read_threshold() {
+  local file="$1" value
+
+  [[ -f $file ]] || return 1
+  { read -r value <"$file"; } 2>/dev/null || return 1
+  [[ $value =~ ^[0-9]+$ ]] || return 1
+
+  printf '%s\n' "$value"
+}
+
+# `off` is the honest name for the no-op of the hardware, because the drivers use
+# 100 to mean "charge all the way".
+normalize() {
+  local value="$1"
+
+  [[ $value == "off" ]] && value=100
+  [[ $value =~ ^[0-9]+$ ]] || return 1
+  (( value >= 0 && value <= 100 )) || return 1
+
+  printf '%s\n' "$value"
+}
+
+report() {
+  local battery end start
+
+  battery=$(threshold_battery) || return 1
+
+  if end=$(read_threshold "$battery/charge_control_end_threshold"); then
+    printf 'end\t%s\n' "$end"
+  fi
+
+  if start=$(read_threshold "$battery/charge_control_start_threshold"); then
+    printf 'start\t%s\n' "$start"
+  fi
+}
+
+apply() {
+  local requested="$1" battery start_file end_file current_start lowered effective
+
+  battery=$(threshold_battery) || {
+    echo "This machine exposes no battery charge limit control." >&2
+    exit 1
+  }
+
+  start_file="$battery/charge_control_start_threshold"
+  end_file="$battery/charge_control_end_threshold"
+
+  # thinkpad_acpi, dell_laptop and the TUXEDO driver reject a write that leaves
+  # start >= end. They test after each write, not across the pair. Thus an end at
+  # or below the current start needs room first. This code does not touch a start
+  # that is already below the new end. That hysteresis belongs to the user, and a
+  # new one here moves it silently on every change.
+  if current_start=$(read_threshold "$start_file") && (( current_start >= requested )); then
+    lowered=$(( requested - 5 ))
+    (( lowered < 0 )) && lowered=0
+
+    printf '%s\n' "$lowered" >"$start_file" || {
+      echo "Could not lower the charge start threshold: $start_file" >&2
+      exit 1
+    }
+  fi
+
+  printf '%s\n' "$requested" >"$end_file" || {
+    echo "Could not set the charge limit: $end_file" >&2
+    exit 1
+  }
+
+  # The kernel ABI lets drivers round a written value to the nearest value that
+  # the hardware supports. A read returns the value that the driver set. Report
+  # that value, not the value that the caller asked for, so callers see the truth.
+  if effective=$(read_threshold "$end_file"); then
+    printf '%s\n' "$effective"
+  else
+    printf '%s\n' "$requested"
+  fi
+}
+
+# True when sudo can run this exact command without a password prompt. `sudo -l` on
+# its own reports whether a command is permitted, and the blanket %wheel rule
+# answers yes to everything. The long listing prints the tags of the matched entry.
+# Thus !authenticate is the grant in etc/sudoers.d/omarchy-battery-threshold and
+# nothing else. The listing runs nothing, and with -n it prompts for nothing. A
+# machine whose omarchy-settings predates that file thus falls through to polkit,
+# and does not stop at a password prompt that it has no terminal to show.
+sudo_grants_passwordless() {
+  sudo -n -l -l "$PACKAGED_PATH" "$@" 2>/dev/null | grep -q '!authenticate'
+}
+
+# Unlike omarchy-dns, this does not exec, because the caller must still record the
+# value after the hardware takes it.
+run_privileged() {
+  local requested="$1"
+
+  if (( EUID == 0 )); then
+    apply "$requested"
+  elif [[ -t 0 ]] || sudo_grants_passwordless --apply "$requested"; then
+    # A terminal can carry the password prompt of sudo. Without a terminal, sudo
+    # is right only where the grant reaches. polkit can at least put a prompt on
+    # screen, and offer to authenticate as someone else.
+    sudo "$PACKAGED_PATH" --apply "$requested"
+  else
+    pkexec "$PACKAGED_PATH" --apply "$requested"
+  fi
+}
+
+# The unprivileged half writes this, so it lands in the state directory of the user
+# who invoked the command. It records the value only after the hardware takes it.
+# --restore thus does not replay a setting that never applied.
+record_state() {
+  mkdir -p "$state_dir"
+  printf '%s\n' "$1" >"$state_dir/threshold"
+}
+
+# Re-applies the recorded limit at session start. A machine that never had a limit
+# has nothing to restore, and neither does hardware that lost its threshold
+# support. A kernel that dropped the driver does that, and so does a battery that
+# someone replaced. Every such case exits quietly, because this runs from
+# autostart on every session, desktops included.
+restore() {
+  local threshold battery current
+
+  [[ -r $state_dir/threshold ]] || return 0
+  threshold=$(<"$state_dir/threshold")
+  [[ $threshold =~ ^[0-9]+$ ]] || return 0
+
+  battery=$(threshold_battery) || return 0
+
+  # Most laptops keep the limit in the EC across a reboot. Where the hardware
+  # still holds the recorded value, replaying it would only elevate for a no-op,
+  # and raise a polkit prompt at every login on installs without the sudoers
+  # grant.
+  if current=$(read_threshold "$battery/charge_control_end_threshold") && (( current == threshold )); then
+    return 0
+  fi
+
+  run_privileged "$threshold"
+}
+
+case "${1:-}" in
+  "")
+    report
+    ;;
+  --apply)
+    (( $# == 2 )) || usage
+    requested=$(normalize "$2") || usage
+    apply "$requested"
+    ;;
+  --restore)
+    (( $# == 1 )) || usage
+    restore
+    ;;
+  *)
+    (( $# == 1 )) || usage
+    requested=$(normalize "$1") || usage
+    run_privileged "$requested"
+    record_state "$requested"
+    ;;
+esac

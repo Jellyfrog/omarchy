@@ -1,0 +1,8 @@
+# The charge limit is a slider in the power panel, and every login applies it
+# again. Thus it must not stop for a password. Unlike omarchy-dns Custom, the
+# argument is not a value that the machine then trusts. --apply clamps it to 0-100
+# and writes it to a charge-control sysfs file. The glob forms are thus as narrow
+# as an enumeration. An enumeration also pins this file to the notch list of the
+# panel. Anyone who set an off-notch value from a terminal then faces a polkit
+# prompt at every login.
+%wheel ALL=(root) NOPASSWD: /usr/bin/omarchy-battery-threshold --apply [0-9], /usr/bin/omarchy-battery-threshold --apply [0-9][0-9], /usr/bin/omarchy-battery-threshold --apply 100

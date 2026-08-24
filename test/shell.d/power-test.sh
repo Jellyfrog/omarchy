@@ -48,4 +48,28 @@ assert(/Math\.round\(root\.batteryFraction \* 100\) \+ "% " \+ root\.batteryIcon
 assert(/openPanelIndicatorWidth:.*showPercentage.*button\.glyphPaintedWidth : 0/.test(panelSource), 'power spans the open-panel mark across the painted percentage block')
 assert(/IpcHandler[\s\S]*?function togglePercentage\(\) \{ root\.togglePercentage\(\) \}/.test(panelSource), 'power exposes togglePercentage over IPC')
 assert(/manageIpc: false/.test(panelSource), 'power owns its IPC handler so it can extend the target methods')
+
+const stops = [40, 50, 60, 70, 80, 90, 100]
+assertEqual(power.nearestThresholdStop(stops, 80), 4, 'power maps a charge limit onto its notch')
+// The CLI takes any integer, and the driver can round again. Thus the slider must
+// show an off-notch value, and it must not move the hardware to a notch.
+assertEqual(power.nearestThresholdStop(stops, 86), 5, 'power rounds an off-notch charge limit to the nearest notch')
+// A value exactly between two notches takes the lower one. A tie thus goes to the
+// gentler limit, and the battery does not charge further than the user asked.
+assertEqual(power.nearestThresholdStop(stops, 85), 4, 'power breaks a notch tie toward the lower limit')
+assertEqual(power.nearestThresholdStop(stops, 5), 0, 'power clamps a charge limit below the lowest notch')
+assertEqual(power.nearestThresholdStop([], 80), 0, 'power survives an empty notch list')
+
+assertEqual(power.chargeLimitLabel(100), 'Off', 'power calls a 100% limit off, since that is what the drivers mean by it')
+assertEqual(power.chargeLimitLabel(80), '80%', 'power labels a real charge limit')
+assertEqual(power.chargeLimitLabel(-1), '\u2014', 'power shows a placeholder where supported hardware has reported no limit yet')
+
+assert(/command: \["omarchy-battery-threshold"\]/.test(panelSource), 'power reads the charge limit from the CLI')
+// A non-zero exit is the capability probe. asus_wmi reports the interface as
+// present but unreadable until the first write, so the output alone cannot decide.
+assert(/onExited: function\(exitCode\)[\s\S]*?updateChargeLimit\(thresholdProc\.stdout\.text, exitCode === 0\)/.test(panelSource), 'power takes charge limit support from the reader exit code')
+assert(/visible: root\.chargeLimitSupported/.test(panelSource), 'power hides the charge limit section on hardware without one')
+assert(/actionProc\.command = \["omarchy-battery-threshold", String\(thresholdStops\[index\]\)\]/.test(panelSource), 'power sets the charge limit through the CLI')
+assert(/function setChargeLimit\(index\) \{[\s\S]*?chargeLimitPreview = index/.test(panelSource), 'power holds the chosen notch while the change is in flight')
+assert(/focusSection === "profile" \? "limit" : "profile"/.test(panelSource), 'power moves the keyboard between the profile row and the charge limit')
 JS

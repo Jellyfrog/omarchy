@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# omarchy:summary=Re-apply the saved battery charge limit on login
+# omarchy:hidden=true
+
+# The restore logic lives in omarchy-battery-threshold, next to the state file it
+# replays and the hardware probing it needs.
+exec omarchy-battery-threshold --restore
