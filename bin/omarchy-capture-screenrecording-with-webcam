@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # omarchy:summary=Pick a webcam and start a screen recording with it
-# omarchy:examples=omarchy capture screenrecording-with-webcam
+# omarchy:args=[<screenrecording options>]
+# omarchy:examples=omarchy capture screenrecording-with-webcam | omarchy capture screenrecording-with-webcam --scope=windows
 
 mapfile -t devices < <(omarchy-capture-webcam-list)
 if (( ${#devices[@]} == 0 )); then
@@ -16,6 +17,8 @@ else
   device="${selection%%[[:space:]]*}"
 fi
 
+# Trailing "$@" so a caller can add to, or override, the defaults above — the
+# menu's scope rows arrive that way.
 exec omarchy-capture-screenrecording \
   --with-desktop-audio --with-microphone-audio \
-  --with-webcam --webcam-device="$device"
+  --with-webcam --webcam-device="$device" "$@"

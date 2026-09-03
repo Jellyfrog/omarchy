@@ -377,17 +377,50 @@ pass "screenrecord rejects an unknown capture scope"
 
 menu_file="$ROOT/default/omarchy/omarchy-menu.jsonc"
 
-# Matched loosely on purpose: the row's id, label and action are the contract,
-# the icon is a styling choice the assertion should not pin down.
-for scope_row in \
-  'region:Region:--scope=region' \
-  'window:Window:--scope=windows' \
-  'screen:Screen:--fullscreen'; do
-  IFS=: read -r row_id row_label row_flag <<<"$scope_row"
+# Every audio choice offers every scope, so the two axes stay independent
+# instead of one of them owning a privileged default.
+audio_rows=(
+  "no-audio:omarchy-capture-screenrecording"
+  "desktop-audio:omarchy-capture-screenrecording --with-desktop-audio"
+  "microphone:omarchy-capture-screenrecording --with-desktop-audio --with-microphone-audio"
+  "webcam:omarchy-capture-screenrecording-with-webcam"
+)
+scope_rows=("region:Region:region" "window:Window:windows" "screen:Screen:fullscreen")
 
-  grep -E "\"trigger\.capture\.screenrecord\.scope\.$row_id\": *\{.*\"label\":\"$row_label\".*\"action\":\"omarchy-capture-screenrecording $row_flag\"" \
-    "$menu_file" >/dev/null ||
-    fail "screenrecord menu offers each capture scope" \
-      "missing: trigger.capture.screenrecord.scope.$row_id -> $row_label -> $row_flag"
+for audio_row in "${audio_rows[@]}"; do
+  audio_id=${audio_row%%:*}
+  audio_command=${audio_row#*:}
+
+  # An audio row that still carries its own action would swallow the scopes
+  # underneath it, so the menu must render it as a submenu.
+  grep -E "\"trigger\.capture\.screenrecord\.$audio_id\": *\{[^}]*\"action\"" "$menu_file" >/dev/null &&
+    fail "screenrecord menu asks for a scope after every audio choice" \
+      "trigger.capture.screenrecord.$audio_id still runs an action instead of opening the scope submenu"
+
+  for scope_row in "${scope_rows[@]}"; do
+    IFS=: read -r scope_id scope_label scope_mode <<<"$scope_row"
+
+    # Matched loosely on purpose: the row's id, label and action are the
+    # contract, the icon is a styling choice not worth pinning down.
+    grep -E "\"trigger\.capture\.screenrecord\.$audio_id\.$scope_id\": *\{.*\"label\":\"$scope_label\".*\"action\":\"$audio_command --scope=$scope_mode\"" \
+      "$menu_file" >/dev/null ||
+      fail "screenrecord menu asks for a scope after every audio choice" \
+        "missing: trigger.capture.screenrecord.$audio_id.$scope_id -> $audio_command --scope=$scope_mode"
+  done
 done
-pass "screenrecord menu offers each capture scope"
+pass "screenrecord menu asks for a scope after every audio choice"
+
+# The webcam row reaches the recorder through a wrapper, so the wrapper has to
+# hand the scope on rather than swallow it.
+grep -E '^\s*--with-webcam --webcam-device="\$device" "\$@"' \
+  "$ROOT/bin/omarchy-capture-screenrecording-with-webcam" >/dev/null ||
+  fail "screenrecording webcam picker forwards the capture scope"
+pass "screenrecording webcam picker forwards the capture scope"
+
+# "Record With Desktop + Microphone Audio" is a scope submenu's header, and it
+# truncates at the default card width, so the wider card has to survive the step
+# down from the audio row that earned it.
+grep -F 'root.activeMenu.startsWith("trigger.capture.screenrecord.")' \
+  "$ROOT/shell/plugins/menu/Menu.qml" >/dev/null ||
+  fail "screenrecord menu keeps its card width across the scope submenus"
+pass "screenrecord menu keeps its card width across the scope submenus"
