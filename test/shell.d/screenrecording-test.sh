@@ -299,3 +299,95 @@ grep -F 'move = { "(monitor_w-monitor_h*2/9-40)", "(monitor_h-monitor_h/4-40)" }
 grep -F 'move = { "(monitor_w-monitor_h*3/10-40)", "(monitor_h-monitor_h*27/80-40)" }' "$webcam_rules" >/dev/null || \
   fail "large webcam starts at its final corner position"
 pass "webcam size rules place the initial window in its final corner"
+
+# --- capture scope -----------------------------------------------------------
+
+cat >"$stub_bin/omarchy-capture-region" <<'SH'
+#!/bin/bash
+
+printf '%s\n' "$@" >"$OMARCHY_TEST_PICKER_ARGS"
+exit 1 # cancel the pick so nothing downstream runs
+SH
+
+cat >"$stub_bin/gpu-screen-recorder" <<'SH'
+#!/bin/bash
+
+printf '%s\n' "$@" >"$OMARCHY_TEST_GSR_ARGS"
+SH
+
+# Nothing is recording, and there is nothing to kill, for every scope case
+cat >"$stub_bin/pgrep" <<'SH'
+#!/bin/bash
+
+exit 1
+SH
+
+cat >"$stub_bin/pkill" <<'SH'
+#!/bin/bash
+
+exit 1
+SH
+
+chmod +x "$stub_bin/omarchy-capture-region" "$stub_bin/gpu-screen-recorder" \
+  "$stub_bin/pgrep" "$stub_bin/pkill"
+
+export OMARCHY_TEST_PICKER_ARGS="$tmp_dir/picker-args"
+export OMARCHY_TEST_GSR_ARGS="$tmp_dir/gsr-args"
+export OMARCHY_SCREENRECORD_DIR="$tmp_dir/videos"
+mkdir -p "$OMARCHY_SCREENRECORD_DIR"
+
+picker_mode_for() {
+  rm -f "$OMARCHY_TEST_PICKER_ARGS"
+  "$ROOT/bin/omarchy-capture-screenrecording" "$@" >/dev/null 2>&1
+  head -1 "$OMARCHY_TEST_PICKER_ARGS" 2>/dev/null
+}
+
+for scope_case in ":smart" "--scope=smart:smart" "--scope=region:region" "--scope=windows:windows"; do
+  scope_flag=${scope_case%:*}
+  expected_mode=${scope_case#*:}
+
+  if [[ -n $scope_flag ]]; then
+    actual_mode=$(picker_mode_for "$scope_flag")
+  else
+    actual_mode=$(picker_mode_for)
+  fi
+
+  [[ $actual_mode == "$expected_mode" ]] ||
+    fail "screenrecord picks the capture scope with the region picker" \
+      "expected: ${scope_flag:-<no flag>} -> $expected_mode\nactual:   ${scope_flag:-<no flag>} -> ${actual_mode:-<picker not run>}"
+done
+pass "screenrecord picks the capture scope with the region picker"
+
+# The picker is only there to answer "what should I record"; a scope that
+# already answers that must not open it.
+for bypass_flag in "--fullscreen" "--scope=fullscreen"; do
+  [[ -z $(picker_mode_for "$bypass_flag") ]] ||
+    fail "screenrecord records the focused monitor without opening the picker" \
+      "$bypass_flag opened the picker with: $(cat "$OMARCHY_TEST_PICKER_ARGS")"
+done
+pass "screenrecord records the focused monitor without opening the picker"
+
+rm -f "$OMARCHY_TEST_PICKER_ARGS"
+if "$ROOT/bin/omarchy-capture-screenrecording" --scope=bogus >/dev/null 2>&1; then
+  fail "screenrecord rejects an unknown capture scope"
+fi
+[[ -f $OMARCHY_TEST_PICKER_ARGS ]] &&
+  fail "screenrecord rejects an unknown capture scope before opening the picker"
+pass "screenrecord rejects an unknown capture scope"
+
+menu_file="$ROOT/default/omarchy/omarchy-menu.jsonc"
+
+# Matched loosely on purpose: the row's id, label and action are the contract,
+# the icon is a styling choice the assertion should not pin down.
+for scope_row in \
+  'region:Region:--scope=region' \
+  'window:Window:--scope=windows' \
+  'screen:Screen:--fullscreen'; do
+  IFS=: read -r row_id row_label row_flag <<<"$scope_row"
+
+  grep -E "\"trigger\.capture\.screenrecord\.scope\.$row_id\": *\{.*\"label\":\"$row_label\".*\"action\":\"omarchy-capture-screenrecording $row_flag\"" \
+    "$menu_file" >/dev/null ||
+    fail "screenrecord menu offers each capture scope" \
+      "missing: trigger.capture.screenrecord.scope.$row_id -> $row_label -> $row_flag"
+done
+pass "screenrecord menu offers each capture scope"

@@ -2,8 +2,8 @@
 
 # omarchy:summary=Start or stop screen recording
 # omarchy:group=capture
-# omarchy:args=[--fullscreen] [--with-desktop-audio] [--with-microphone-audio] [--with-webcam] [--webcam-device=<device>] [--webcam-size=<small|medium|large>] [--resolution=<size>] [--stop-recording]
-# omarchy:examples=omarchy screenrecord | omarchy capture screenrecording --with-desktop-audio
+# omarchy:args=[--scope=<smart|region|windows|fullscreen>] [--fullscreen] [--with-desktop-audio] [--with-microphone-audio] [--with-webcam] [--webcam-device=<device>] [--webcam-size=<small|medium|large>] [--resolution=<size>] [--stop-recording]
+# omarchy:examples=omarchy screenrecord | omarchy capture screenrecording --with-desktop-audio | omarchy capture screenrecording --scope=windows
 # omarchy:aliases=omarchy screenrecord
 #
 # Env: OMARCHY_SCREENRECORD_USE_PORTAL=true skips the built-in slurp picker and
@@ -12,7 +12,9 @@
 # for monitors driven by external GPUs, and window capture — enable it if any
 # of those matter to you. Off by default because the portal path can fail EGL
 # DMA-BUF modifier import on some configurations, leaving recording unable to
-# start.
+# start. Its window capture is not what --scope=windows does: the portal
+# follows the window, while --scope=windows only snaps the picker to the
+# window's rectangle and records that area for the rest of the recording.
 #
 # Env: OMARCHY_SCREENRECORD_DEBUG=true appends gpu-screen-recorder's stderr (and
 # the picker target it was launched with) to /tmp/omarchy-screenrecord.log so
@@ -32,7 +34,7 @@ WEBCAM="false"
 WEBCAM_DEVICE=""
 WEBCAM_SIZE="medium"
 RESOLUTION=""
-FULLSCREEN="false"
+SCOPE="smart"
 STOP_RECORDING="false"
 RECORDING_FILE="/tmp/omarchy-screenrecord-filename"
 REGION_FILE="${XDG_RUNTIME_DIR:-/tmp}/omarchy-screenrecord-region"
@@ -46,7 +48,8 @@ for arg in "$@"; do
   --webcam-device=*) WEBCAM_DEVICE="${arg#*=}" ;;
   --webcam-size=*) WEBCAM_SIZE="${arg#*=}" ;;
   --resolution=*) RESOLUTION="${arg#*=}" ;;
-  --fullscreen) FULLSCREEN="true" ;;
+  --scope=*) SCOPE="${arg#*=}" ;;
+  --fullscreen) SCOPE="fullscreen" ;;
   --stop-recording) STOP_RECORDING="true" ;;
   esac
 done
@@ -55,6 +58,16 @@ case $WEBCAM_SIZE in
 small | medium | large) ;;
 *)
   echo "Invalid webcam size: $WEBCAM_SIZE (expected small, medium, or large)" >&2
+  exit 1
+  ;;
+esac
+
+# The picker modes omarchy-capture-region accepts, so screenrecord and
+# screenshot name the same scopes the same way.
+case $SCOPE in
+smart | region | windows | fullscreen) ;;
+*)
+  echo "Invalid capture scope: $SCOPE (expected smart, region, windows, or fullscreen)" >&2
   exit 1
   ;;
 esac
@@ -128,7 +141,7 @@ default_resolution() {
 # user cancelled the picker.
 select_capture_target() {
   local target
-  target=$(omarchy-capture-region smart --match-monitor) || return 1
+  target=$(omarchy-capture-region "$SCOPE" --match-monitor) || return 1
 
   if [[ $target == monitor:* ]]; then
     echo "$target"
@@ -151,7 +164,7 @@ start_screenrecording() {
   # the portal backend supports and the kms backend doesn't). Default flow uses
   # slurp + the kms backend, which avoids the EGL DMA-BUF modifier import
   # failures the portal path can hit on some configurations.
-  if [[ $FULLSCREEN == "true" ]]; then
+  if [[ $SCOPE == "fullscreen" ]]; then
     target="monitor:$(omarchy-hyprland-monitor-focused)"
     capture_args=(-w "${target#monitor:}" -s "${RESOLUTION:-$(default_resolution)}")
   elif [[ ${OMARCHY_SCREENRECORD_USE_PORTAL:-false} == "true" ]]; then
